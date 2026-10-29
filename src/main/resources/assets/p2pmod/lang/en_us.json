@@ -1,0 +1,35 @@
+{
+  "p2pmod.status.mode": "mode",
+  "p2pmod.status.link": "link",
+  "p2pmod.status.loss": "loss",
+  "p2pmod.status.repeat_on": "status every %ss",
+  "p2pmod.status.repeat_off": "status off",
+
+  "p2pmod.path.relay": "relay",
+  "p2pmod.path.direct": "direct",
+  "p2pmod.path.none": "none",
+  "p2pmod.path.up": "up",
+  "p2pmod.path.down": "down",
+  "p2pmod.unit.ms": "%sms",
+
+  "p2pmod.mode.unknown": "Unknown mode '%s', use auto or relay",
+
+  "p2pmod.host.closed": "Room closed",
+  "p2pmod.host.op_only": "Only server operators can change hosting",
+  "p2pmod.host.no_room": "No room is open",
+  "p2pmod.host.rename_failed": "Room change failed: %s",
+  "p2pmod.host.room": "Room %s%s -- join with p2p:%s",
+  "p2pmod.host.reassigned": " (taken, reassigned)",
+  "p2pmod.host.reconnect": " (players must reconnect)",
+  "p2pmod.host.registered": "Room %s%s -- join with p2p:%s",
+  "p2pmod.host.failed": "Registration failed: %s",
+
+  "p2pmod.lan.opened": "LAN world open: room %s -- join with p2p:%s",
+  "p2pmod.lan.failed": "Could not open a p2p room for this LAN world: %s",
+
+  "p2pmod.server.room": "room[%s] clients[%s]",
+  "p2pmod.server.paths": " direct[%s] relay[%s]",
+
+  "p2pmod.kick.both_down": "Both links are down, please reconnect",
+  "p2pmod.kick.stalled": "Connection lost (no response for a while), please reconnect"
+}

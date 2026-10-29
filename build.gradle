@@ -1,0 +1,131 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+version = mod_version
+group = mod_group_id
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+
+    options.encoding = 'UTF-8'
+}
+
+def buildJvmJava = {
+    def exe = new File(System.getProperty('java.home'), 'bin/java')
+    if (!exe.exists()) {
+        exe = new File(System.getProperty('java.home'), 'bin/java.exe')
+    }
+    exe.exists() ? exe.absolutePath : null
+}()
+
+tasks.withType(net.neoforged.nfrtgradle.NeoFormRuntimeTask).configureEach {
+    if (buildJvmJava != null) {
+        javaExecutable = buildJvmJava
+    }
+}
+
+project.afterEvaluate {
+    tasks.withType(net.neoforged.nfrtgradle.CreateMinecraftArtifacts).configureEach {
+        if (buildJvmJava != null) {
+            toolsJavaExecutable = buildJvmJava
+            javaExecutable = buildJvmJava
+        }
+    }
+
+    def currentJdk = JavaLanguageVersion.of(JavaVersion.current().majorVersion as int)
+    tasks.withType(JavaCompile).configureEach {
+        javaCompiler = javaToolchains.compilerFor {
+            languageVersion = currentJdk
+        }
+    }
+}
+
+def onCi = System.getenv('GITHUB_ACTIONS') == 'true'
+
+if (!onCi) {
+    def useNeoForgeCdn = {
+        project.repositories.each { r ->
+            def u = r.hasProperty('url') ? r.url?.toString() : null
+            if (u?.startsWith('https://maven.neoforged.net/')) {
+                r.setUrl("https://neoforged.forgecdn.net${r.url.path}")
+            }
+        }
+    }
+    useNeoForgeCdn()
+
+    gradle.projectsEvaluated {
+        useNeoForgeCdn()
+        def dead = project.repositories
+                .collect { it.hasProperty('url') ? it.url?.toString() : null }
+                .findAll { it?.startsWith('https://maven.neoforged.net/') }
+        if (dead) {
+            throw new org.gradle.api.GradleException("[p2pmod] These repositories were not redirected to the CDN and will hang until timeout: ${dead}")
+        }
+    }
+}
+
+repositories {
+
+    maven { url = 'https://maven.minecraftforge.net' }
+
+    maven { url = 'https://maven.parchmentmc.org' }
+
+    mavenCentral()
+}
+
+neoForge {
+    version = neo_version
+
+    runs {
+        client {
+            client()
+            gameDirectory = file('runs/client')
+        }
+        server {
+            server()
+            gameDirectory = file('runs/server')
+            programArgument '--nogui'
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [
+            "minecraft_version"      : minecraft_version,
+            "minecraft_version_range": minecraft_version_range,
+            "neo_version"            : neo_version,
+            "neo_version_range"      : neo_version_range,
+            "loader_version_range"   : loader_version_range,
+            "mod_id"                 : mod_id,
+            "mod_name"               : mod_name,
+            "mod_license"            : mod_license,
+            "mod_version"            : mod_version,
+            "mod_authors"            : mod_authors,
+            "mod_description"        : mod_description
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+
+neoForge.ideSyncTask generateModMetadata
+
+jar {
+    manifest {
+        attributes([
+            'Implementation-Title'  : mod_name,
+            'Implementation-Version': mod_version
+        ])
+    }
+}

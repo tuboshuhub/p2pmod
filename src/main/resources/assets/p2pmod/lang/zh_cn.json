@@ -1,0 +1,36 @@
+{
+  "p2pmod.status.mode": "模式",
+  "p2pmod.status.link": "链路",
+  "p2pmod.status.loss": "丢包",
+  "p2pmod.status.repeat_on": "每 %s 秒刷新一次状态",
+  "p2pmod.status.repeat_off": "已停止刷新状态",
+
+  "p2pmod.path.relay": "中继",
+  "p2pmod.path.direct": "直连",
+  "p2pmod.path.none": "无",
+  "p2pmod.path.up": "通",
+  "p2pmod.path.down": "断",
+  "p2pmod.unit.ms": "%sms",
+
+  "p2pmod.mode.unknown": "未知模式 '%s'，可选 auto 或 relay",
+
+  "p2pmod.host.closed": "房间已关闭",
+  "p2pmod.host.op_only": "只有服务器管理员可以修改开房设置",
+  "p2pmod.host.no_room": "当前没有开房",
+  "p2pmod.host.rename_failed": "更换房间号失败：%s",
+  "p2pmod.host.room": "房间 %s%s —— 用 p2p:%s 进入",
+  "p2pmod.host.reassigned": "（已被占用，已重新分配）",
+  "p2pmod.host.reconnect": "（玩家需要重新连接）",
+  "p2pmod.host.registered": "房间 %s%s —— 用 p2p:%s 进入",
+  "p2pmod.host.failed": "开房失败：%s",
+
+ 
+  "p2pmod.lan.opened": "已开放局域网：房间 %s —— 用 p2p:%s 进入",
+  "p2pmod.lan.failed": "这个局域网的 p2p 房间没开起来：%s",
+
+  "p2pmod.server.room": "房间[%s] 在线[%s]",
+  "p2pmod.server.paths": " 直连[%s] 中继[%s]",
+
+  "p2pmod.kick.both_down": "中继和直连都断了，请重新连接",
+  "p2pmod.kick.stalled": "连接已中断（长时间无响应），请重新连接"
+}

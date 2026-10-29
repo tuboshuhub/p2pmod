@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2pmod-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
+
+      - name: Package relay
+        run: |
+          chmod +x p2pmod-relay/package.sh
+          bash p2pmod-relay/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2pmod-relay
+          path: |
+            build/relay-dist/*.tar.gz
+            build/relay-dist/*.zip
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            build/libs/*.jar
+            build/relay-dist/*.tar.gz
+            build/relay-dist/*.zip

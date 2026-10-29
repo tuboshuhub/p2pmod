@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "dev.p2pmod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "client": [
+    "ServerAddressMixin",
+    "PlayerTabOverlayMixin",
+    "KeepAliveReplyMixin",
+    "IntegratedServerLanMixin"
+  ],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
