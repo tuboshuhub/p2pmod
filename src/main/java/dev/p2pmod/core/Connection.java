@@ -134,6 +134,12 @@ public final class Connection implements Endpoint.ConnObserver {
                 },
                 fecEnabled, fecK, fecR);
         this.sender = new Sender(connId, () -> preferred, fecEnabled, fecK, fecR);
+        if (fecEnabled) {
+            Trace.info("[P2P] FEC {} (K={}, R={}) conn={}",
+                    "enabled", fecK, fecR, connId);
+        } else {
+            Trace.info("[P2P] FEC {} conn={}", "disabled", connId);
+        }
         endpoint.bind(connId, this);
         Scheduler.register(beat);
     }

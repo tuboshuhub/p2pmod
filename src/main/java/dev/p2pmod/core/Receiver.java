@@ -115,9 +115,22 @@ public final class Receiver {
             if (accLen - off - Mux.HEADER < len) break;
             byte[] payload = new byte[len];
             System.arraycopy(acc, off + Mux.HEADER, payload, 0, len);
+            // Advance past the frame BEFORE dispatching it. If handling throws, the
+            // accumulator must still be realigned; otherwise the stale frame stays at
+            // the head of the buffer and every later packet is re-parsed into the same
+            // failure, silently wedging the whole stream (no delivery, no ACKs).
             off += Mux.HEADER + len;
-            route(seq, payload);
-            if (fecEnabled) noteFecSource(seq, payload);
+            try {
+                route(seq, payload);
+                // Mux.CTRL_SEQ frames are ACK/NACK control, not data fragments. They
+                // must never enter the FEC matrix: seq < 0 makes pos negative and
+                // indexes b.matrix[-1], which throws and kills the frame.
+                if (fecEnabled && seq != Mux.CTRL_SEQ) noteFecSource(seq, payload);
+            } catch (Throwable t) {
+                corrupt.incrementAndGet();
+                Trace.periodic("[P2P] Dropped a frame (seq {}) that failed to process: {}",
+                        seq, String.valueOf(t));
+            }
         }
         int remaining = accLen - off;
         if (remaining > 0) System.arraycopy(acc, off, acc, 0, remaining);
@@ -138,14 +151,17 @@ public final class Receiver {
     }
 
     private void noteFecSource(long seq, byte[] payload) {
+        if (seq < 0 || payload == null) return;
         int K = fecK;
-        long blockId = seq / K;
         int pos = (int) (seq % K);
+        if (pos < 0 || pos >= K) return;
+        long blockId = seq / K;
         FecBlock b = block(blockId);
         if (b.k != K) return;
         if (pos < b.k) {
-            System.arraycopy(payload, 0, b.matrix[pos], 0, payload.length);
-            b.lengths[pos] = payload.length;
+            int n = Math.min(payload.length, b.matrix[pos].length);
+            System.arraycopy(payload, 0, b.matrix[pos], 0, n);
+            b.lengths[pos] = n;
             if (!b.present[pos]) { b.present[pos] = true; b.got++; }
             if (pos + 1 > b.kactual) b.kactual = pos + 1;
         }
