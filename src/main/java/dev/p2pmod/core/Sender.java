@@ -559,13 +559,14 @@ public final class Sender {
     }
 
     private void maybeFlushFec() {
-        if (!fecEnabled) return;
-        synchronized (fecLock) {
-            if (!fecPending.isEmpty() && fecPending.size() < fecK
-                    && System.currentTimeMillis() - fecBlockStartMs >= FEC_FLUSH_MS) {
-                flushFecBlock(fecPending.size());
-            }
-        }
+        // Intentionally a no-op. FEC parity is only emitted once a full group of
+        // fecK source fragments is buffered (see bufferFec). Partial flushes are
+        // disabled on purpose: a partial block would compute blockId = base / K on
+        // the sender while the receiver keys blocks by seq / K, so when base is not a
+        // multiple of K two distinct data groups collapse onto the same FEC block.
+        // The recomputed parity then corrupts the decode matrix and the recovered
+        // fragments get re-injected into the in-order stream at the wrong sequence
+        // numbers, stalling delivery. Groups stay strictly K-aligned now.
     }
 
     private void flushFecBlock(int m) {
@@ -612,10 +613,15 @@ public final class Sender {
     }
 
     public void close() {
-        if (fecEnabled) {
-            synchronized (fecLock) {
-                if (!fecPending.isEmpty()) flushFecBlock(fecPending.size());
-            }
+        // Do NOT emit a partial FEC block here: a partial flush would misalign the
+        // (blockId = base / K) mapping and can emit recovery data for fragments that
+        // were never sent, corrupting the receiver's in-order stream. Remaining
+        // in-flight fragments are still covered by ARQ, so dropping the pending FEC
+        // group is safe.
+        synchronized (fecLock) {
+            fecPending.clear();
+            fecBlockBase = -1;
+            fecBlockStartMs = 0;
         }
         closed = true;
         flusher.interrupt();
