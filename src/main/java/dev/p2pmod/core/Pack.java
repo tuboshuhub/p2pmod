@@ -20,6 +20,8 @@ public final class Pack {
 
     public static final byte KIND_MODE      = 0x08;
 
+    public static final byte KIND_FEC       = 0x09;
+
     public static byte[] build(int connId, byte kind, byte[] body, int off, int len) {
         byte[] out = new byte[HEADER + len];
         out[0] = MAGIC_0;

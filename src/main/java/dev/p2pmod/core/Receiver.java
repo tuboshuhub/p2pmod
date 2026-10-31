@@ -37,6 +37,12 @@ public final class Receiver {
     private final Feedback feedback;
     private final AppSink app;
 
+    private final boolean fecEnabled;
+    private final int fecK;
+    private final int fecR;
+    private final Object fecLock = new Object();
+    private final java.util.Map<Long, FecBlock> fecBlocks = new java.util.LinkedHashMap<>();
+
     private final Object bufLock = new Object();
     private byte[] acc = new byte[8192];
     private int accLen;
@@ -59,10 +65,15 @@ public final class Receiver {
     private final AtomicLong future = new AtomicLong();
     private final AtomicLong corrupt = new AtomicLong();
 
-    public Receiver(ControlSink ctrl, Feedback feedback, AppSink app) {
+    public Receiver(ControlSink ctrl, Feedback feedback, AppSink app, boolean fecEnabled, int fecK, int fecR) {
         this.ctrl = ctrl;
         this.feedback = feedback;
         this.app = app;
+        int k = Math.max(1, Math.min(255, fecK));
+        int r = Math.max(0, Math.min(255 - k, fecR));
+        this.fecEnabled = fecEnabled;
+        this.fecK = k;
+        this.fecR = r;
         this.courier = new Thread(this::deliverLoop, "p2p-rx-deliver");
         this.courier.setDaemon(true);
         this.courier.start();
@@ -106,6 +117,7 @@ public final class Receiver {
             System.arraycopy(acc, off + Mux.HEADER, payload, 0, len);
             off += Mux.HEADER + len;
             route(seq, payload);
+            if (fecEnabled) noteFecSource(seq, payload);
         }
         int remaining = accLen - off;
         if (remaining > 0) System.arraycopy(acc, off, acc, 0, remaining);
@@ -123,6 +135,99 @@ public final class Receiver {
             return;
         }
         dispatch(seq, payload);
+    }
+
+    private void noteFecSource(long seq, byte[] payload) {
+        int K = fecK;
+        long blockId = seq / K;
+        int pos = (int) (seq % K);
+        FecBlock b = block(blockId);
+        if (b.k != K) return;
+        if (pos < b.k) {
+            System.arraycopy(payload, 0, b.matrix[pos], 0, payload.length);
+            b.lengths[pos] = payload.length;
+            if (!b.present[pos]) { b.present[pos] = true; b.got++; }
+            if (pos + 1 > b.kactual) b.kactual = pos + 1;
+        }
+        tryFec(blockId);
+    }
+
+    public void ingestFec(byte[] body) {
+        if (!fecEnabled || body == null || body.length < 12 + 2 * fecK) return;
+        long blockId = 0;
+        for (int i = 0; i < 8; i++) blockId = (blockId << 8) | (body[i] & 0xFF);
+        int parityIndex = body[8] & 0xFF;
+        int K = body[9] & 0xFF;
+        int R = body[10] & 0xFF;
+        int kactual = body[11] & 0xFF;
+        if (K != fecK || R != fecR) return;
+        int[] lens = new int[K];
+        int o = 12;
+        for (int j = 0; j < K; j++) {
+            lens[j] = ((body[o] & 0xFF) << 8) | (body[o + 1] & 0xFF);
+            o += 2;
+        }
+        int pLen = body.length - o;
+        if (pLen != Mux.FRAG_SIZE) return;
+        byte[] parity = new byte[pLen];
+        System.arraycopy(body, o, parity, 0, pLen);
+        FecBlock b = block(blockId);
+        if (b.k != K) return;
+        for (int j = 0; j < K; j++) b.lengths[j] = lens[j];
+        if (kactual < b.kactual) b.kactual = kactual;
+        if (parityIndex < R) {
+            System.arraycopy(parity, 0, b.matrix[K + parityIndex], 0, pLen);
+            if (!b.present[K + parityIndex]) { b.present[K + parityIndex] = true; b.got++; }
+        }
+        tryFec(blockId);
+    }
+
+    private FecBlock block(long blockId) {
+        synchronized (fecLock) {
+            FecBlock b = fecBlocks.get(blockId);
+            if (b == null) {
+                b = new FecBlock(fecK, fecR);
+                fecBlocks.put(blockId, b);
+                if (fecBlocks.size() > 256) {
+                    java.util.Iterator<Long> it = fecBlocks.keySet().iterator();
+                    if (it.hasNext()) fecBlocks.remove(it.next());
+                }
+            }
+            return b;
+        }
+    }
+
+    private void tryFec(long blockId) {
+        java.util.List<Long> seqs = null;
+        java.util.List<byte[]> payloads = null;
+        synchronized (fecLock) {
+            FecBlock b = fecBlocks.get(blockId);
+            if (b == null || b.done) return;
+            int missing = 0;
+            for (int pos = 0; pos < b.kactual; pos++) if (!b.present[pos]) missing++;
+            if (missing == 0) { b.done = true; fecBlocks.remove(blockId); return; }
+            if (b.got < b.k) return;
+            byte[][] rec = Fec.decode(b.matrix, b.present, b.k, b.r);
+            if (rec == null) return;
+            seqs = new java.util.ArrayList<>();
+            payloads = new java.util.ArrayList<>();
+            for (int pos = 0; pos < b.kactual; pos++) {
+                if (!b.present[pos]) {
+                    int len = b.lengths[pos];
+                    byte[] out = new byte[len];
+                    System.arraycopy(rec[pos], 0, out, 0, len);
+                    seqs.add(blockId * b.k + pos);
+                    payloads.add(out);
+                }
+            }
+        }
+        if (seqs != null) {
+            for (int i = 0; i < seqs.size(); i++) route(seqs.get(i), payloads.get(i));
+            synchronized (fecLock) {
+                FecBlock b = fecBlocks.get(blockId);
+                if (b != null) { b.done = true; fecBlocks.remove(blockId); }
+            }
+        }
     }
 
     private void dispatch(long seq, byte[] payload) {
@@ -233,6 +338,25 @@ public final class Receiver {
         closed = true;
         courier.interrupt();
         delivery.clear();
+    }
+
+    private static final class FecBlock {
+        final int k, r;
+        final byte[][] matrix;
+        final boolean[] present;
+        final int[] lengths;
+        int kactual;
+        int got;
+        boolean done;
+        FecBlock(int k, int r) {
+            this.k = k;
+            this.r = r;
+            matrix = new byte[k + r][Mux.FRAG_SIZE];
+            present = new boolean[k + r];
+            lengths = new int[k];
+            kactual = k;
+            got = 0;
+        }
     }
 
     private static void sleepQuietly(long ms) {

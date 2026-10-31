@@ -44,6 +44,10 @@ public final class Config {
 
     public static volatile RouteMode mode = RouteMode.AUTO;
 
+    public static volatile boolean fecEnabled = true;
+    public static volatile int fecGroup = 10;
+    public static volatile int fecParity = 2;
+
     public static void load() {
         try {
             Properties p = new Properties();
@@ -69,6 +73,9 @@ public final class Config {
             acceptBeforeReady = boolOr(p.getProperty("host.acceptBeforeReady"), true);
             autoRoomOnLan = boolOr(p.getProperty("lan.autoRoom"), true);
             mode = RouteMode.of(p.getProperty("mode"));
+            fecEnabled = boolOr(p.getProperty("fec.enabled"), true);
+            fecGroup = intOr(p.getProperty("fec.group"), 10);
+            fecParity = intOr(p.getProperty("fec.parity"), 2);
             Trace.setVerbose(verbose);
         } catch (Throwable t) {
             Trace.warn("[P2P] Reading the config failed, using defaults: {}", t.toString());
@@ -94,6 +101,9 @@ public final class Config {
             p.setProperty("host.acceptBeforeReady", "true");
             p.setProperty("lan.autoRoom", "true");
             p.setProperty("mode", RouteMode.AUTO.id);
+            p.setProperty("fec.enabled", "true");
+            p.setProperty("fec.group", "10");
+            p.setProperty("fec.parity", "2");
             try (OutputStream out = Files.newOutputStream(FILE)) {
                 p.store(new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8),
                         "p2pmod");

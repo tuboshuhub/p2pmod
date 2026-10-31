@@ -45,6 +45,15 @@ public final class Sender {
     private final int connId;
     private final Route route;
 
+    private final boolean fecEnabled;
+    private final int fecK;
+    private final int fecR;
+    private final Object fecLock = new Object();
+    private final java.util.ArrayDeque<byte[]> fecPending = new java.util.ArrayDeque<>();
+    private long fecBlockBase = -1;
+    private long fecBlockStartMs = 0;
+    private static final long FEC_FLUSH_MS = 25;
+
     private final Object lock = new Object();
     private long nextSeq;
     private long lastAcked = -1;
@@ -123,9 +132,14 @@ public final class Sender {
         Record(byte[] frame) { this.frame = frame; }
     }
 
-    public Sender(int connId, Route route) {
+    public Sender(int connId, Route route, boolean fecEnabled, int fecK, int fecR) {
         this.connId = connId;
         this.route = route;
+        int k = Math.max(1, Math.min(255, fecK));
+        int r = Math.max(0, Math.min(255 - k, fecR));
+        this.fecEnabled = fecEnabled;
+        this.fecK = k;
+        this.fecR = r;
         this.flusher = new Thread(this::flushLoop, "p2p-tx-" + connId);
         this.flusher.setDaemon(true);
         this.flusher.start();
@@ -147,8 +161,9 @@ public final class Sender {
 
             reserve(committed);
             byte[] frame;
+            long seq;
             synchronized (lock) {
-                long seq = nextSeq++;
+                seq = nextSeq++;
                 frame = Mux.frame(seq, data, off, n);
 
                 if (inflight.isEmpty()) lastAckMs = System.currentTimeMillis();
@@ -157,6 +172,11 @@ public final class Sender {
             }
 
             offer(frame);
+            if (fecEnabled) {
+                byte[] pay = new byte[n];
+                System.arraycopy(data, off, pay, 0, n);
+                bufferFec(seq, pay);
+            }
             off += n;
             committed = true;
         }
@@ -197,6 +217,7 @@ public final class Sender {
     }
 
     public void tick() {
+        maybeFlushFec();
         Path p = route.path();
         if (p == null || !p.usable()) return;
         long now = System.currentTimeMillis();
@@ -526,7 +547,76 @@ public final class Sender {
         synchronized (lock) { return new java.util.HashSet<>(nackWanted.keySet()); }
     }
 
+    private void bufferFec(long seq, byte[] payload) {
+        synchronized (fecLock) {
+            if (fecPending.isEmpty()) {
+                fecBlockBase = seq;
+                fecBlockStartMs = System.currentTimeMillis();
+            }
+            fecPending.add(payload);
+            if (fecPending.size() == fecK) flushFecBlock(fecK);
+        }
+    }
+
+    private void maybeFlushFec() {
+        if (!fecEnabled) return;
+        synchronized (fecLock) {
+            if (!fecPending.isEmpty() && fecPending.size() < fecK
+                    && System.currentTimeMillis() - fecBlockStartMs >= FEC_FLUSH_MS) {
+                flushFecBlock(fecPending.size());
+            }
+        }
+    }
+
+    private void flushFecBlock(int m) {
+        Path p = route.path();
+        if (p == null || !p.usable()) {
+            synchronized (fecLock) { fecPending.clear(); fecBlockBase = -1; fecBlockStartMs = 0; }
+            return;
+        }
+        int K = fecK, R = fecR;
+        byte[][] src = new byte[K][Mux.FRAG_SIZE];
+        int[] lens = new int[K];
+        for (int i = 0; i < m; i++) {
+            byte[] pay = fecPending.poll();
+            if (pay == null) break;
+            System.arraycopy(pay, 0, src[i], 0, pay.length);
+            lens[i] = pay.length;
+        }
+        byte[][] parity = Fec.encode(src, K, R);
+        long blockId = fecBlockBase / K;
+        for (int i = 0; i < R; i++) {
+            byte[] body = buildFecBody(blockId, i, K, R, m, lens, parity[i]);
+            try {
+                p.send(Pack.build(connId, Pack.KIND_FEC, body, 0, body.length));
+            } catch (IOException ignored) {
+            }
+        }
+        synchronized (fecLock) { fecBlockBase = -1; fecBlockStartMs = 0; }
+    }
+
+    private static byte[] buildFecBody(long blockId, int parityIndex, int K, int R, int kactual, int[] lens, byte[] parity) {
+        byte[] body = new byte[12 + 2 * K + parity.length];
+        for (int i = 0; i < 8; i++) body[i] = (byte) (blockId >>> (8 * (7 - i)));
+        body[8] = (byte) parityIndex;
+        body[9] = (byte) K;
+        body[10] = (byte) R;
+        body[11] = (byte) kactual;
+        int o = 12;
+        for (int j = 0; j < K; j++) {
+            body[o++] = (byte) (lens[j] >>> 8);
+            body[o++] = (byte) lens[j];
+        }
+        System.arraycopy(parity, 0, body, o, parity.length);
+        return body;
+    }
+
     public void close() {
+        if (fecEnabled) {
+            synchronized (fecLock) {
+                if (!fecPending.isEmpty()) flushFecBlock(fecPending.size());
+            }
+        }
         closed = true;
         flusher.interrupt();
         queue.clear();
