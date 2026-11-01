@@ -118,7 +118,14 @@ public final class Sender {
 
     private static final class Record {
         final byte[] frame;
-        long sentAt = System.currentTimeMillis();
+        /**
+         * 0 means the frame is still sitting in the outbound queue and has never hit the
+         * socket. It must not be judged by the retransmission timer, otherwise a frame
+         * that is merely queued behind a slow link looks like a loss, gets sent twice
+         * (once by the retransmit below, once by the flusher when it finally pops the
+         * queue) and pollutes the loss statistics.
+         */
+        long sentAt;
         int retries;
         Record(byte[] frame) { this.frame = frame; }
     }
@@ -210,6 +217,7 @@ public final class Sender {
                 if (urgent >= NACK_BURST || resent >= BURST_CAP) break;
                 Record r = inflight.get(s);
                 if (r == null || s <= lastAcked) continue;
+                if (r.sentAt == 0) continue;
                 if (now - r.sentAt < NACK_RESEND_MIN_MS) continue;
                 try {
                     p.send(packet(r.frame));
@@ -233,6 +241,7 @@ public final class Sender {
 
                 if (seq > gap) break;
                 Record r = e.getValue();
+                if (r.sentAt == 0) continue;
                 long wait = r.retries >= MAX_RETRIES ? SLOW_RETRY_MS : backoff(base, r.retries);
                 if (now - r.sentAt <= wait) continue;
                 try {
@@ -293,12 +302,36 @@ public final class Sender {
         rateSampleSentStart = framesSent;
     }
 
+    /**
+     * Ceiling for the in-flight window, derived from the measured throughput and RTT.
+     * Without it the window grows to SEND_WINDOW no matter how little the link can
+     * carry, and everything beyond one bandwidth-delay product simply piles up in the
+     * path and gets dropped. On the observed ~250 KB/s link with 50 ms RTT the usable
+     * BDP is about 10 fragments, against a ceiling of 8192.
+     */
+    private int windowLimit() {
+        int rate = ackedRate;
+        if (rate <= 0) return SEND_WINDOW;
+        Path p = route.path();
+        int rtt = (p != null && p.rtt() > 0) ? p.rtt() : 100;
+        long bdp = (long) rate * rtt / 1000L;
+        long cap = bdp * 3 + 16;
+        return (int) Math.max(64, Math.min(SEND_WINDOW, cap));
+    }
+
     private void growCwnd(long now) {
         if (now - lastCwndGrowMs < CWND_GROW_GAP_MS) return;
-        int c = cwnd;
-        if (c >= SEND_WINDOW) return;
         lastCwndGrowMs = now;
-        cwnd = Math.min(SEND_WINDOW, c + Math.max(CWND_GROW_MIN, c / 8));
+        int c = cwnd;
+        int limit = windowLimit();
+        if (c > limit) {
+            // The measured capacity is below the current window: ease back towards it
+            // instead of keeping a window that only feeds the bottleneck queues.
+            cwnd = Math.max(limit, c - Math.max(CWND_GROW_MIN, c / 8));
+            return;
+        }
+        if (c >= limit) return;
+        cwnd = Math.min(limit, c + Math.max(CWND_GROW_MIN, c / 8));
     }
 
     private void cutCwnd(long now) {
@@ -375,7 +408,10 @@ public final class Sender {
 
         double rate = ackedRate > 0 ? ackedRate * 1.25 : c * 1000.0 / Math.max(10, rtt);
 
-        if (rate < 1_500) rate = 1_500;
+        // Floor of 64 fragments/s (~83 KB/s). The old floor of 1500 fragments/s
+        // (~1.95 MB/s) was several times faster than the links this runs on, so pacing
+        // never actually throttled anything.
+        if (rate < 64) rate = 64;
 
         if (rate > 12_000) rate = 12_000;
 
@@ -419,6 +455,7 @@ public final class Sender {
             for (long s = seq; s < seq + NACK_BURST_RESEND; s++) {
                 Record r = inflight.get(s);
                 if (r == null || s <= lastAcked) continue;
+                if (r.sentAt == 0) continue;
                 try {
                     p.send(packet(r.frame));
                     r.sentAt = now;
@@ -500,7 +537,10 @@ public final class Sender {
             }
             int written = 0;
             try {
-                for (; written < batch.size(); written++) p.send(packet(batch.get(written)));
+                for (; written < batch.size(); written++) {
+                    p.send(packet(batch.get(written)));
+                    markSent(batch.get(written));
+                }
             } catch (IOException e) {
                 synchronized (lock) {
                     for (int i = batch.size() - 1; i >= written; i--) {
@@ -536,6 +576,20 @@ public final class Sender {
             nackWanted.clear();
             parked.clear();
             parkedBytes = 0;
+        }
+    }
+
+    /**
+     * Stamps a record only once the socket has actually taken the frame. Frames still
+     * queued (or parked waiting for a path) keep sentAt == 0, so the retransmission
+     * timers skip them: they were never lost, they simply have not been sent yet.
+     */
+    private void markSent(byte[] frame) {
+        if (isControl(frame)) return;
+        long seq = Mux.seqOf(frame, 0);
+        synchronized (lock) {
+            Record r = inflight.get(seq);
+            if (r != null && r.sentAt == 0) r.sentAt = System.currentTimeMillis();
         }
     }
 
@@ -597,6 +651,7 @@ public final class Sender {
         Path p = route.path();
         if (p != null && p.usable()) {
             p.send(packet(frame));
+            markSent(frame);
             return true;
         }
         synchronized (lock) {
