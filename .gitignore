@@ -40,3 +40,4 @@ runs/
 *.bak
 *.tmp
 
+rollback/

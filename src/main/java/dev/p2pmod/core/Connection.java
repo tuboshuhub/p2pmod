@@ -1,6 +1,5 @@
 package dev.p2pmod.core;
 
-import dev.p2pmod.support.Config;
 import dev.p2pmod.support.Scheduler;
 import dev.p2pmod.support.Trace;
 
@@ -111,9 +110,6 @@ public final class Connection implements Endpoint.ConnObserver {
     public Connection(int connId, Endpoint endpoint, Receiver.AppSink app) {
         this.connId = connId;
         this.endpoint = endpoint;
-        boolean fecEnabled = Config.fecEnabled;
-        int fecK = Config.fecGroup;
-        int fecR = Config.fecParity;
         this.receiver = new Receiver(
 
                 new Receiver.ControlSink() {
@@ -131,15 +127,8 @@ public final class Connection implements Endpoint.ConnObserver {
                 data -> {
                     lastMoveMs = System.currentTimeMillis();
                     app.accept(data);
-                },
-                fecEnabled, fecK, fecR);
-        this.sender = new Sender(connId, () -> preferred, fecEnabled, fecK, fecR);
-        if (fecEnabled) {
-            Trace.info("[P2P] FEC {} (K={}, R={}) conn={}",
-                    "enabled", fecK, fecR, connId);
-        } else {
-            Trace.info("[P2P] FEC {} conn={}", "disabled", connId);
-        }
+                });
+        this.sender = new Sender(connId, () -> preferred);
         endpoint.bind(connId, this);
         Scheduler.register(beat);
     }
@@ -248,8 +237,6 @@ public final class Connection implements Endpoint.ConnObserver {
 
             switch (kind) {
             case Pack.KIND_DATA -> receiver.ingest(body);
-
-            case Pack.KIND_FEC -> receiver.ingestFec(body);
 
             case Pack.KIND_PING -> {
                 lastMoveMs = System.currentTimeMillis();
