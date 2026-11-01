@@ -143,8 +143,11 @@ public class Endpoint implements Closeable {
             InetSocketAddress from = new InetSocketAddress(Bytes.normalize(p.getAddress()), p.getPort());
             try {
                 dispatch(raw, len, from);
-            } catch (Throwable ignored) {
-
+            } catch (Throwable t) {
+                // One malformed packet must never kill the loop, but swallowing it in
+                // silence is how a fatal protocol bug once hid for two deploys. Log at a
+                // throttled rate so a persistent fault becomes visible.
+                Trace.periodic("[P2P] Dropped an inbound packet ({}B from {}): {}", len, from, String.valueOf(t));
             }
         }
     }

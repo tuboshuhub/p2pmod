@@ -113,15 +113,16 @@ public final class Connection implements Endpoint.ConnObserver {
         this.receiver = new Receiver(
 
                 new Receiver.ControlSink() {
-                    @Override public void onAck(long cumulative) {
+                    @Override public void onAck(long cumulative, int credit) {
                         sender.onAck(cumulative);
+                        sender.onCredit(credit);
                         lastMoveMs = System.currentTimeMillis();
                     }
                     @Override public void onNack(long missing) { sender.onNack(missing); }
                 },
 
                 new Receiver.Feedback() {
-                    @Override public void ack(long cumulative) { sender.emitAck(cumulative); }
+                    @Override public void ack(long cumulative, int credit) { sender.emitAck(cumulative, credit); }
                     @Override public void nack(long missing) { sender.emitNack(missing); }
                 },
                 data -> {
@@ -391,7 +392,7 @@ public final class Connection implements Endpoint.ConnObserver {
             for (InetSocketAddress a : exits) {
                 byte[] body = new byte[Bytes.ADDR_LEN];
                 Bytes.putAddr(body, 0, a);
-                for (int i = 0; i < 3; i++) reply(p, Pack.KIND_NATADDR, body);
+                for (int i = 0; i < 2; i++) reply(p, Pack.KIND_NATADDR, body);
             }
         }
         lastAnnounceMs = now();
@@ -435,7 +436,7 @@ public final class Connection implements Endpoint.ConnObserver {
         byte[] body = new byte[] { (byte) (preferRelay ? 1 : 0) };
         for (Path p : paths.values()) {
             if (p.state() == Path.State.DEAD) continue;
-            for (int i = 0; i < 3; i++) reply(p, Pack.KIND_MODE, body);
+            for (int i = 0; i < 2; i++) reply(p, Pack.KIND_MODE, body);
         }
         lastModeSentMs = now();
     }
@@ -591,9 +592,13 @@ public final class Connection implements Endpoint.ConnObserver {
 
             long cum = receiver.cumulative();
             if (cum >= 0) {
-                byte[] ack = Mux.control(Mux.CTRL_ACK, cum);
-                for (Path p : paths.values()) {
-                    if (!p.usable()) continue;
+                // A single copy on the preferred path is enough: this is a cumulative
+                // ACK, so the next heartbeat (or the peer's NACK) covers a lost one.
+                // Sending it on every usable path doubled control traffic on links that
+                // had both a relay and a direct leg.
+                byte[] ack = Mux.controlWithCredit(Mux.CTRL_ACK, cum, receiver.credit());
+                Path p = preferred;
+                if (p != null && p.usable()) {
                     try {
                         p.send(Pack.build(connId, Pack.KIND_DATA, ack, 0, ack.length));
                     } catch (IOException ignored) {

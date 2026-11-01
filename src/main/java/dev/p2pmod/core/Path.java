@@ -155,7 +155,10 @@ public final class Path {
         if (!usable()) return -1;
 
         long base = rtt > 0 ? rtt : 500;
-        if (via == Via.RELAY) base += 30;
+        // Proportional relay penalty instead of a flat +30 ms: on a 300 ms relay leg the
+        // old constant was noise, so "prefer direct" never actually bit. Keep a 10 ms
+        // floor so a very fast relay still loses to an equally fast direct leg.
+        if (via == Via.RELAY) base += Math.max(10, base / 5);
         long ref = lastInMs > 0 ? lastInMs : createdMs;
         long silence = Math.min(Math.max(0, System.currentTimeMillis() - ref), 5_000);
         long s = base + silence / 100;

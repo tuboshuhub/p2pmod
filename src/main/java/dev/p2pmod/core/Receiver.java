@@ -12,12 +12,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class Receiver {
 
     public interface ControlSink {
-        void onAck(long cumulative);
+        void onAck(long cumulative, int credit);
         void onNack(long missingSeq);
     }
 
     public interface Feedback {
-        void ack(long cumulative);
+        void ack(long cumulative, int credit);
         void nack(long missingSeq);
     }
 
@@ -26,6 +26,9 @@ public final class Receiver {
     private static final int MAX_PENDING = 4096;
 
     private static final int DELIVER_BYTES_CAP = 32 * 1024 * 1024;
+
+    /** Delivery slots advertised to the peer; roughly 8 MB of queued payloads. */
+    private static final int DELIVERY_FRAMES_CAP = 6144;
 
     private static final long NACK_INTERVAL_MS = 80;
 
@@ -128,7 +131,7 @@ public final class Receiver {
             if (payload.length < 9) return;
             byte kind = Mux.ctrlKindOf(payload);
             long v = Mux.ctrlValueOf(payload);
-            if (kind == Mux.CTRL_ACK) ctrl.onAck(v);
+            if (kind == Mux.CTRL_ACK) ctrl.onAck(v, Mux.ctrlCreditOf(payload));
             else ctrl.onNack(v);
             return;
         }
@@ -167,10 +170,21 @@ public final class Receiver {
             for (byte[] p : ready) handUp(p);
         }
 
-        if (jumpedTo >= 0) feedback.ack(jumpedTo);
+        if (jumpedTo >= 0) feedback.ack(jumpedTo, credit());
         else if (++delivered % ACK_EVERY == 0) {
-            synchronized (seqLock) { feedback.ack(expectSeq - 1); }
+            synchronized (seqLock) { feedback.ack(expectSeq - 1, credit()); }
         }
+    }
+
+    /**
+     * Free delivery slots advertised to the peer. Once the application (the local
+     * Minecraft socket) stops draining, this reaches zero and the sender stops handing
+     * us new data, which keeps the backlog — and therefore the blocking in handUp —
+     * small instead of letting one slow consumer stall the shared receive thread.
+     */
+    public int credit() {
+        int free = DELIVERY_FRAMES_CAP - delivery.size();
+        return Math.max(0, free);
     }
 
     private void drain(List<byte[]> sink) {
@@ -209,6 +223,11 @@ public final class Receiver {
         deliveryBytes.addAndGet(payload.length);
         delivery.offer(payload);
 
+        if (deliveryBytes.get() > DELIVER_BYTES_CAP) {
+            Trace.periodic("[P2P] Delivery backlog above {}MB ({} frames queued): the local socket is not "
+                            + "draining, pausing the receive thread until the application catches up",
+                    DELIVER_BYTES_CAP / (1024 * 1024), delivery.size());
+        }
         while (!closed && deliveryBytes.get() > DELIVER_BYTES_CAP) {
             sleepQuietly(5);
         }

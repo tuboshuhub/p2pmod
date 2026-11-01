@@ -6,7 +6,6 @@
   "client": [
     "ServerAddressMixin",
     "PlayerTabOverlayMixin",
-    "KeepAliveReplyMixin",
     "IntegratedServerLanMixin"
   ],
   "server": [],

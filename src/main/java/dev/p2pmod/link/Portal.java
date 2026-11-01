@@ -36,17 +36,33 @@ public final class Portal {
         public static final Status IDLE = new Status("not connected", -1, -1, false);
     }
 
-    public static synchronized int join(String target) throws IOException {
+    /**
+     * Guards only the two session fields. It deliberately does not wrap the network
+     * work: joining does DNS plus a relay round trip, and hosting waits up to eight
+     * seconds for registration, which used to freeze every other Portal call
+     * (switching link mode, stopping the room, the HUD) for that whole time.
+     */
+    private static final Object SESSION_LOCK = new Object();
+
+    public static int join(String target) throws IOException {
         leave();
         Joining j = new Joining(target);
         int port = j.start();
-        main = j;
+        Joining old;
+        synchronized (SESSION_LOCK) {
+            old = main;
+            main = j;
+        }
+        if (old != null && old != j) closeQuietly(old);
         return port;
     }
 
-    public static synchronized void leave() {
-        Joining j = main;
-        main = null;
+    public static void leave() {
+        Joining j;
+        synchronized (SESSION_LOCK) {
+            j = main;
+            main = null;
+        }
         if (j != null) j.close();
 
         RouteCache.clear();
@@ -93,7 +109,11 @@ public final class Portal {
             }
         }
 
-        long deadline = System.currentTimeMillis() + 2_000;
+        // This runs on Minecraft's server-pinger thread, once per list entry: a 2 s wait
+        // here serialised into a multi-second "pinging..." state for the whole list.
+        // 500 ms is plenty for a local proxy to come up; if it is slower, the ping just
+        // fails and the next refresh retries.
+        long deadline = System.currentTimeMillis() + 500;
         while (!j.ready() && !j.closed() && System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(20);
@@ -133,29 +153,40 @@ public final class Portal {
         }
     }
 
-    public static synchronized void host(String relayHost, int relayPort, String roomName, int mcPort)
+    public static void host(String relayHost, int relayPort, String roomName, int mcPort)
             throws Exception {
         stopRoom();
         Hosting h = new Hosting(relayHost, relayPort, roomName, mcPort);
         h.start();
-        room = h;
+        synchronized (SESSION_LOCK) {
+            room = h;
+        }
     }
 
-    public static synchronized String rebind(String newRoom) throws Exception {
-        Hosting current = room;
+    public static String rebind(String newRoom) throws Exception {
+        Hosting current;
+        synchronized (SESSION_LOCK) {
+            current = room;
+        }
         if (current == null) throw new IllegalStateException("Not hosting right now, cannot change the room id");
         String host = current.relayHost();
         int port = current.relayPort();
         int mc = current.mcPort();
         stopRoom();
         host(host, port, newRoom, mc);
-        Hosting after = room;
+        Hosting after;
+        synchronized (SESSION_LOCK) {
+            after = room;
+        }
         return after == null ? newRoom : after.room();
     }
 
-    public static synchronized void stopRoom() {
-        Hosting h = room;
-        room = null;
+    public static void stopRoom() {
+        Hosting h;
+        synchronized (SESSION_LOCK) {
+            h = room;
+            room = null;
+        }
         if (h != null) h.close();
     }
 
@@ -186,10 +217,13 @@ public final class Portal {
         }
     }
 
-    public static synchronized RouteMode setMode(RouteMode m) {
+    public static RouteMode setMode(RouteMode m) {
         if (m == null) return Config.mode;
         Config.saveMode(m);
-        Joining j = main;
+        Joining j;
+        synchronized (SESSION_LOCK) {
+            j = main;
+        }
         if (j != null) j.setMode(m);
         return m;
     }
@@ -229,7 +263,7 @@ public final class Portal {
         return sb.toString();
     }
 
-    public static synchronized void shutdownAll() {
+    public static void shutdownAll() {
         java.util.List<Joining> probes;
         synchronized (PROBE_LOCK) {
             probes = new java.util.ArrayList<>(PROBES.values());

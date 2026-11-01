@@ -165,9 +165,10 @@ public final class Frontend implements Closeable {
         OutputStream o = mcOut;
         if (o == null) return;
         try {
-            synchronized (this) {
-                if (mcOut != null) mcOut.write(data);
-            }
+            // Write outside the monitor. This call blocks whenever the client's socket
+            // buffer is full, and the accept loop plus the reader's teardown need the
+            // same lock: holding it across a blocking write froze new sessions too.
+            o.write(data);
             downBytes += data.length;
             lastDownMs = System.currentTimeMillis();
         } catch (IOException e) {

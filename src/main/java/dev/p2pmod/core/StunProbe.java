@@ -26,15 +26,26 @@ public final class StunProbe {
 
     public record Result(InetSocketAddress mapped, NatType type) {}
 
+    /**
+     * Domestic first. The old list started with the two Google servers, which are
+     * routinely unreachable from mainland China: every probe burned 2 s per server
+     * before falling through to a working one. These are well-known public STUN
+     * endpoints; the Google entries are kept only as a last-resort fallback.
+     */
     private static final String[] SERVERS = {
-        "stun.l.google.com:19302",
-        "stun1.l.google.com:19302",
-        "stun.xten.com:3478",
-        "stun.voipbuster.com:3478",
         "stun.miwifi.com:3478",
+        "stun.qq.com:3478",
+        "stun.chat.bilibili.com:3478",
+        "stun.hitv.com:3478",
+        "stun.douyucdn.cn:18000",
+        "stun.l.google.com:19302",
     };
 
     private static final long TIMEOUT_MS = 2_000;
+
+    /** How many servers to ask at once. Two good answers are enough to type the NAT. */
+    private static final int MAX_PARALLEL = 4;
+
     private static final int MAGIC = 0x2112A442;
 
     public static String[] defaultServers() {
@@ -45,24 +56,58 @@ public final class StunProbe {
         return probe(endpoint, null);
     }
 
+    /**
+     * Fires every candidate at once and returns as soon as two of them answer, instead
+     * of walking the list one by one with a 2 s timeout each. Locally this turns a
+     * multi-second stall (or a total failure when the first entries are blocked) into
+     * a sub-100 ms probe.
+     */
     public static Result probe(Endpoint endpoint, String[] servers) {
         String[] list = (servers == null || servers.length == 0) ? SERVERS : servers;
+        int n = Math.min(list.length, MAX_PARALLEL);
+
+        java.util.List<Pending> pending = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            Pending p = start(endpoint, list[i]);
+            if (p != null) pending.add(p);
+        }
+        if (pending.isEmpty()) {
+            Trace.debug("[P2P] No usable STUN server configured; relay only");
+            return null;
+        }
+
+        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         InetSocketAddress first = null;
         String firstServer = null;
-        for (String s : list) {
-            InetSocketAddress mapped = ask(endpoint, s);
-            if (mapped == null) continue;
-            if (first == null) {
-                first = mapped;
-                firstServer = s;
-                continue;
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                for (java.util.Iterator<Pending> it = pending.iterator(); it.hasNext(); ) {
+                    Pending p = it.next();
+                    if (p.latch.getCount() != 0) continue;
+                    it.remove();
+                    InetSocketAddress mapped = parse(p.got.get(), p.txid);
+                    if (mapped == null) continue;
+                    if (first == null) {
+                        first = mapped;
+                        firstServer = p.server;
+                        continue;
+                    }
+                    boolean same = mapped.getPort() == first.getPort()
+                            && mapped.getAddress().equals(first.getAddress());
+                    NatType type = same ? NatType.CONE : NatType.SYMMETRIC;
+                    log(first, type, firstServer + " / " + p.server);
+                    return new Result(first, type);
+                }
+                if (first != null && pending.isEmpty()) break;
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
-
-            boolean samePort = mapped.getPort() == first.getPort()
-                    && mapped.getAddress().equals(first.getAddress());
-            NatType type = samePort ? NatType.CONE : NatType.SYMMETRIC;
-            log(first, type, firstServer + " / " + s);
-            return new Result(first, type);
+        } finally {
+            for (Pending p : pending) endpoint.unregisterStun(p.txid);
         }
         if (first != null) {
             log(first, NatType.UNKNOWN, firstServer);
@@ -72,14 +117,18 @@ public final class StunProbe {
         return null;
     }
 
-    private static void log(InetSocketAddress mapped, NatType type, String via) {
-        Trace.info("[P2P] STUN probe done: public egress={} local NAT type={} (via {})", mapped, type.label, via);
-        Trace.info("[P2P] Direct connectivity depends on both NAT types: traversal essentially fails only when "
-                + "both sides are symmetric; trust the actual path switch, not this prediction");
+    private static final class Pending {
+        final String server;
+        final byte[] txid;
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<byte[]> got = new AtomicReference<>();
+        Pending(String server, byte[] txid) {
+            this.server = server;
+            this.txid = txid;
+        }
     }
 
-    private static InetSocketAddress ask(Endpoint endpoint, String server) {
-
+    private static Pending start(Endpoint endpoint, String server) {
         HostPort.Split split = HostPort.split(server, 3478);
         if (split.host().isEmpty()) return null;
         InetSocketAddress target;
@@ -91,24 +140,24 @@ public final class StunProbe {
 
         byte[] txid = new byte[12];
         new java.security.SecureRandom().nextBytes(txid);
-        byte[] req = request(txid);
-
-        AtomicReference<byte[]> got = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
+        Pending p = new Pending(server, txid);
         endpoint.registerStun(txid, data -> {
-            got.set(data);
-            latch.countDown();
+            p.got.set(data);
+            p.latch.countDown();
         });
         try {
-            endpoint.send(target, req);
-            if (!latch.await(TIMEOUT_MS, TimeUnit.MILLISECONDS)) return null;
+            endpoint.send(target, request(txid));
         } catch (Exception e) {
-            return null;
-        } finally {
             endpoint.unregisterStun(txid);
+            return null;
         }
-        byte[] resp = got.get();
-        return resp == null ? null : parse(resp, txid);
+        return p;
+    }
+
+    private static void log(InetSocketAddress mapped, NatType type, String via) {
+        Trace.info("[P2P] STUN probe done: public egress={} local NAT type={} (via {})", mapped, type.label, via);
+        Trace.info("[P2P] Direct connectivity depends on both NAT types: traversal essentially fails only when "
+                + "both sides are symmetric; trust the actual path switch, not this prediction");
     }
 
     public static byte[] request(byte[] txid) {

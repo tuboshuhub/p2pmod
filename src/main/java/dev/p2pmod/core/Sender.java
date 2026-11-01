@@ -59,6 +59,11 @@ public final class Sender {
     private long lastCwndCutMs;
     private long lastCwndGrowMs;
 
+    /** Free delivery slots the peer last advertised; -1 means "it never said". */
+    private volatile int peerCredit = -1;
+    private long creditBlockedSince;
+    private static final long CREDIT_BLOCK_MAX_MS = 120_000;
+
     private long nextSlotUs;
 
     private long nackSeen;
@@ -174,6 +179,25 @@ public final class Sender {
         long budget = committed ? COMMIT_WINDOW_WAIT_MS : OFFER_TIMEOUT_MS;
         long deadline = System.currentTimeMillis() + budget;
         while (true) {
+            // The peer told us its delivery buffer is full. Blocking the caller (the
+            // local socket reader) is the correct backpressure: it shrinks the TCP
+            // window towards Minecraft instead of piling up in the tunnel. This is not
+            // a dead link, so it must not trip the window-full timeout below.
+            if (peerCredit == 0 && ackSilenceMs() <= 5_000) {
+                long now = System.currentTimeMillis();
+                if (creditBlockedSince == 0) creditBlockedSince = now;
+                if (now - creditBlockedSince > CREDIT_BLOCK_MAX_MS) {
+                    closed = true;
+                    flusher.interrupt();
+                    Trace.warn("[P2P] conn={} peer reported a full delivery buffer for {}ms, closing the connection",
+                            connId, now - creditBlockedSince);
+                    throw new IOException("sender closed: peer delivery buffer never drained");
+                }
+                if (closed) throw new IOException("sender closed");
+                sleepQuietly(10);
+                continue;
+            }
+            creditBlockedSince = 0;
             synchronized (lock) {
 
                 if (inflight.size() < cwnd) {
@@ -476,9 +500,16 @@ public final class Sender {
         }
     }
 
-    public void emitAck(long cumulative) {
+    public void emitAck(long cumulative, int credit) {
         if (closed) return;
-        queue.offer(Mux.control(Mux.CTRL_ACK, cumulative));
+        queue.offer(credit >= 0
+                ? Mux.controlWithCredit(Mux.CTRL_ACK, cumulative, credit)
+                : Mux.control(Mux.CTRL_ACK, cumulative));
+    }
+
+    /** Free delivery slots the peer advertised; -1 when it does not report any. */
+    public void onCredit(int credit) {
+        if (credit >= 0) peerCredit = credit;
     }
 
     public void emitNack(long seq) {
@@ -673,21 +704,15 @@ public final class Sender {
             else break;
         }
         if (inflight.size() > ABSOLUTE_MAX_FRAMES) {
-            int need = inflight.size() - ABSOLUTE_MAX_FRAMES;
-            int dropped = 0;
-            Iterator<Long> it2 = inflight.keySet().iterator();
-            while (need > 0 && it2.hasNext()) {
-                long s = it2.next();
-                if (s <= lastAcked) continue;
-                if (nackWanted.containsKey(s)) continue;
-                it2.remove();
-                need--;
-                dropped++;
-            }
-            if (dropped > 0) {
-                Trace.warn("[P2P] Unacknowledged fragments exceeded the hard cap, evicted {} ({} NACKed fragments protected)",
-                        dropped, nackWanted.size());
-            }
+            // Evicting unacknowledged frames punches holes into the byte stream: the peer
+            // then parses garbage. Failing the connection is the safe outcome, because
+            // Minecraft simply reconnects and the stream restarts cleanly.
+            Trace.error("[P2P] conn={} unacknowledged fragments exceeded the hard cap ({}), closing the "
+                    + "connection instead of silently dropping frames", connId, inflight.size());
+            closed = true;
+            flusher.interrupt();
+            inflight.clear();
+            nackWanted.clear();
         }
         expireNackWanted();
     }
